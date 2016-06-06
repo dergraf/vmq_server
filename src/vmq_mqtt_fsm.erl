@@ -75,6 +75,7 @@
           retry_interval=20000              :: pos_integer(),
           upgrade_qos=false                 :: boolean(),
           trade_consistency=false           :: boolean(),
+          allow_subscriber_groups=false     :: boolean(),
           reg_view=vmq_reg_trie             :: atom()
          }).
 
@@ -93,6 +94,7 @@ init(Peer, Opts) ->
     end,
     AllowAnonymous = vmq_config:get_env(allow_anonymous, false),
     TradeConsistency = vmq_config:get_env(trade_consistency, false),
+    AllowSubscriberGroups = vmq_config:get_env(allow_subscriber_groups, false),
     RetryInterval = vmq_config:get_env(retry_interval, 20),
     MaxClientIdSize = vmq_config:get_env(max_client_id_size, 23),
     MaxInflightMsgs = vmq_config:get_env(max_inflight_messages, 20),
@@ -113,6 +115,7 @@ init(Peer, Opts) ->
                                      keep_alive_tref=TRef,
                                      retry_interval=1000 * RetryInterval,
                                      trade_consistency=TradeConsistency,
+                                     allow_subscriber_groups=AllowSubscriberGroups,
                                      reg_view=RegView}}.
 
 data_in(Data, SessionState) when is_binary(Data) ->
@@ -217,7 +220,7 @@ connected(#mqtt_publish{message_id=MessageId, topic=Topic,
     Ret =
     case {Topic, valid_msg_size(Payload, MaxMessageSize)} of
         {[<<"$", _binary>> |_], _} ->
-            %% $SYS
+            %% $SYS and $GROUP
             {State#state{recv_cnt=incr_msg_recv_cnt(RecvCnt)}, []};
         {_, true} ->
             Msg = #vmq_msg{routing_key=Topic,
@@ -344,8 +347,9 @@ connected(#mqtt_pubcomp{message_id=MessageId}, State) ->
     end;
 connected(#mqtt_subscribe{message_id=MessageId, topics=Topics}, State) ->
     #state{subscriber_id=SubscriberId, username=User,
-           trade_consistency=Consistency} = State,
-    case vmq_reg:subscribe(Consistency, User, SubscriberId, Topics) of
+           trade_consistency=Consistency,
+           allow_subscriber_groups=SubscriberGroups} = State,
+    case vmq_reg:subscribe(Consistency, SubscriberGroups, User, SubscriberId, Topics) of
         {ok, QoSs} ->
             {NewState, Out} = send_frame(#mqtt_suback{message_id=MessageId,
                                                       qos_table=QoSs}, State),

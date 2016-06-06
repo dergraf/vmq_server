@@ -193,6 +193,10 @@ handle_event(Handler, Event) ->
             ok
     end.
 
+handle_delete_event({MP, _} = SubscriberId, [{[<<"$GROUP-", Group/binary>>|Topic], QoS, Node}|Rest]) ->
+    del_topic(MP, Topic, Node),
+    del_subscriber(MP, Topic, {Group, Node, SubscriberId}, QoS),
+    handle_delete_event(SubscriberId, Rest);
 handle_delete_event({MP, _} = SubscriberId, [{Topic, QoS, Node}|Rest]) when Node == node() ->
     del_topic(MP, Topic, Node),
     del_subscriber(MP, Topic, SubscriberId, QoS),
@@ -202,6 +206,11 @@ handle_delete_event({MP, _} = SubscriberId, [{Topic, _, Node}|Rest]) ->
     handle_delete_event(SubscriberId, Rest);
 handle_delete_event(_, []) -> ok.
 
+handle_add_event({MP, _} = SubscriberId, [{[<<"$GROUP-", Group/binary>>|Topic], QoS, Node}|Rest]) ->
+    %% A Topic that is used as part of consistent hashing
+    add_topic(MP, Topic, Node),
+    add_subscriber(MP, Topic, {Group, Node, SubscriberId}, QoS),
+    handle_add_event(SubscriberId, Rest);
 handle_add_event({MP, _} = SubscriberId, [{Topic, QoS, Node}|Rest]) when Node == node() ->
     add_topic(MP, Topic, Node),
     add_subscriber(MP, Topic, SubscriberId, QoS),

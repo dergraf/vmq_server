@@ -19,7 +19,7 @@
 %% API
 -export([
          %% used in mqtt fsm handling
-         subscribe/4,
+         subscribe/5,
          unsubscribe/4,
          register_subscriber/2,
          delete_subscriptions/1,
@@ -51,8 +51,10 @@
          terminate/2,
          code_change/3]).
 
-%% called by vmq_cluster_com
--export([publish/2]).
+%% used in vmq_cluster_com
+-export([publish/4]).
+-export([publish/5]).
+-export([publish_fold_fun/2]).
 
 %% used from plugins
 -export([direct_plugin_exports/1]).
@@ -71,34 +73,34 @@
 -define(TOMBSTONE, '$deleted').
 -define(NR_OF_REG_RETRIES, 10).
 
--spec subscribe(flag(), username() | plugin_id(), subscriber_id(),
+-spec subscribe(flag(), flag(), username() | plugin_id(), subscriber_id(),
                 [{topic(), qos()}]) -> {ok, [qos() | not_allowed]}
                                        | {error, not_allowed
                                        | overloaded
                                        | not_ready}.
 
-subscribe(false, User, SubscriberId, Topics) ->
+subscribe(false, AllowSubscriberGroups, User, SubscriberId, Topics) ->
     %% trade availability for consistency
-    vmq_cluster:if_ready(fun subscribe_/3, [User, SubscriberId, Topics]);
-subscribe(true, User, SubscriberId, Topics) ->
+    vmq_cluster:if_ready(fun subscribe_/4, [User, AllowSubscriberGroups, SubscriberId, Topics]);
+subscribe(true, AllowSubscriberGroups, User, SubscriberId, Topics) ->
     %% trade consistency for availability
-    subscribe_(User, SubscriberId, Topics).
+    subscribe_(User, AllowSubscriberGroups, SubscriberId, Topics).
 
-subscribe_(User, SubscriberId, Topics) ->
+subscribe_(User, AllowSubscriberGroups, SubscriberId, Topics) ->
     case vmq_plugin:all_till_ok(auth_on_subscribe,
                                 [User, SubscriberId, Topics]) of
         ok ->
-            subscribe_op(User, SubscriberId, Topics);
+            subscribe_op(User, AllowSubscriberGroups, SubscriberId, Topics);
         {ok, NewTopics} when is_list(NewTopics) ->
-            subscribe_op(User, SubscriberId, NewTopics);
+            subscribe_op(User, AllowSubscriberGroups, SubscriberId, NewTopics);
         {error, _} ->
             {error, not_allowed}
     end.
 
-subscribe_op(User, SubscriberId, Topics) ->
+subscribe_op(User, AllowSubscriberGroups, SubscriberId, Topics) ->
     rate_limited_op(
       fun() ->
-              add_subscriber(Topics, SubscriberId)
+              add_subscriber(AllowSubscriberGroups, Topics, SubscriberId)
       end,
       fun(_) ->
               QoSTable =
@@ -250,11 +252,9 @@ publish(#vmq_msg{trade_consistency=true,
         true ->
             %% retain set action
             vmq_retain_srv:insert(MP, Topic, Payload),
-            RegView:fold(MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
-            ok;
+            publish(RegView, MP, Topic, Msg#vmq_msg{retain=false});
         false ->
-            RegView:fold(MP, Topic, fun publish/2, Msg),
-            ok
+            publish(RegView, MP, Topic, Msg)
     end;
 publish(#vmq_msg{trade_consistency=false,
                  reg_view=RegView,
@@ -270,31 +270,89 @@ publish(#vmq_msg{trade_consistency=false,
         true when (IsRetain == true) ->
             %% retain set action
             vmq_retain_srv:insert(MP, Topic, Payload),
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
-            ok;
+            publish(RegView, MP, Topic, Msg#vmq_msg{retain=false});
         true ->
-            RegView:fold(MP, Topic, fun publish/2, Msg),
-            ok;
+            publish(RegView, MP, Topic, Msg);
         false ->
             {error, not_ready}
     end.
 
+publish(RegView, MP, Topic, Msg) ->
+    publish(RegView, MP, Topic, fun publish_fold_fun/2, Msg).
+
+publish(RegView, MP, Topic, Fun, Msg) ->
+    Acc = publish_fold_acc(Msg),
+    {NewMsg, SubscriberGroups} = vmq_reg_view:fold(RegView, MP, Topic, Fun, Acc),
+    publish_to_subscriber_groups(NewMsg, SubscriberGroups).
+
 %% publish/2 is used as the fold function in RegView:fold/4
-publish({SubscriberId, QoS}, Msg) ->
-    publish(Msg, QoS, get_queue_pid(SubscriberId));
-publish(Node, Msg) ->
+publish_fold_fun({{_,_} = SubscriberId, QoS}, {Msg, _} = Acc) ->
+    %% Local Subscriber
+    case get_queue_pid(SubscriberId) of
+        not_found -> Acc;
+        QPid ->
+            ok = vmq_queue:enqueue(QPid, {deliver, QoS, Msg}),
+            Acc
+    end;
+publish_fold_fun({{_Group, _Node, _SubscriberId}, _QoS} = Sub, {Msg, SubscriberGroups}) ->
+    %% Subscriber Group
+    {Msg, add_to_subscriber_group(Sub, SubscriberGroups)};
+publish_fold_fun(Node, {Msg, _} = Acc) ->
+    %% Remote Subscriber
     case vmq_cluster:publish(Node, Msg) of
         ok ->
-            Msg;
+            Acc;
         {error, Reason} ->
             lager:warning("can't publish to remote node ~p due to '~p'", [Node, Reason]),
-            Msg
+            Acc
     end.
 
-publish(Msg, _, not_found) -> Msg;
-publish(Msg, QoS, QPid) ->
-    ok = vmq_queue:enqueue(QPid, {deliver, QoS, Msg}),
-    Msg.
+publish_fold_acc(Msg) -> {Msg, undefined}.
+
+publish_to_subscriber_groups(_, undefined) -> ok;
+publish_to_subscriber_groups(Msg, SubscriberGroups) when is_map(SubscriberGroups) ->
+    publish_to_subscriber_groups(Msg, maps:to_list(SubscriberGroups));
+publish_to_subscriber_groups(_, []) -> ok;
+publish_to_subscriber_groups(Msg, [{Group, []}|Rest]) ->
+    lager:warning("can't publish to subscriber group ~p due to no subscriber available", [Group]),
+    publish_to_subscriber_groups(Msg, Rest);
+publish_to_subscriber_groups(Msg, [{Group, SubscriberGroup}|Rest]) ->
+    N = random:uniform(length(SubscriberGroup)),
+    case lists:nth(N, SubscriberGroup) of
+        {Node, SubscriberId, QoS} = Sub when Node == node() ->
+            case get_queue_pid(SubscriberId) of
+                not_found ->
+                    NewSubscriberGroup = lists:delete(Sub, SubscriberGroup),
+                    %% retry with other members of this group
+                    publish_to_subscriber_groups(Msg, [{Group, NewSubscriberGroup}|Rest]);
+                QPid ->
+                    ok = vmq_queue:enqueue(QPid, {deliver, QoS, Msg}),
+                    publish_to_subscriber_groups(Msg, Rest)
+            end;
+        {Node, _, _} = Sub ->
+            #vmq_msg{routing_key=Topic} = Msg,
+            %% it's important that the remote cluster node understands that
+            %% this message has been routed as part of a subscriber group.
+            %% In vmq_cluster_com:publish_fold_fun the $GROUP-Group Prefix
+            %% get's removed again.
+            NewMsg = Msg#vmq_msg{routing_key=[<<"$GROUP-", Group/binary>>|Topic]},
+            case vmq_cluster:publish(Node, NewMsg) of
+                ok ->
+                    publish_to_subscriber_groups(Msg, Rest);
+                {error, Reason} ->
+                    lager:warning("can't publish for subscriber group to remote node ~p due to '~p'", [Node, Reason]),
+                    NewSubscriberGroup = lists:delete(Sub, SubscriberGroup),
+                    %% retry with other members of this group
+                    publish_to_subscriber_groups(Msg, [{Group, NewSubscriberGroup}|Rest])
+            end
+    end.
+
+add_to_subscriber_group(Sub, undefined) ->
+    add_to_subscriber_group(Sub, #{});
+add_to_subscriber_group({{Group, Node, SubscriberId}, QoS}, SubscriberGroups) ->
+    SubscriberGroup = maps:get(Group, SubscriberGroups, []),
+    maps:put(Group, [{Node, SubscriberId, QoS}|SubscriberGroup],
+             SubscriberGroups).
 
 -spec deliver_retained(subscriber_id(), topic(), qos()) -> 'ok'.
 deliver_retained({MP, _} = SubscriberId, Topic, QoS) ->
@@ -564,8 +622,10 @@ direct_plugin_exports(Mod) when is_atom(Mod) ->
             fun([W|_] = Topic) when is_binary(W) ->
                     wait_til_ready(),
                     CallingPid = self(),
+                    AllowSubscriberGroups =
+                    vmq_config:get_env(allow_subscriber_groups, false),
                     User = {plugin, Mod, CallingPid},
-                    subscribe(TradeConsistency, User,
+                    subscribe(TradeConsistency, AllowSubscriberGroups, User,
                               {MountPoint, ClientId(CallingPid)}, [{Topic, 0}]);
                (_) ->
                     {error, invalid_topic}
@@ -691,27 +751,24 @@ fold_sessions(FoldFun, Acc) ->
                 end, AccAcc, vmq_queue:get_sessions(QPid))
       end, Acc).
 
--spec add_subscriber([{topic(), qos() | not_allowed}], subscriber_id()) -> ok.
-add_subscriber(Topics, SubscriberId) ->
+-spec add_subscriber(flag(), [{topic(), qos() | not_allowed}], subscriber_id()) -> ok.
+add_subscriber(AllowSubscriberGroups, Topics, SubscriberId) ->
+    OldSubs = plumtree_metadata:get(?SUBSCRIBER_DB, SubscriberId, [{default, []}]),
     NewSubs =
-    case plumtree_metadata:get(?SUBSCRIBER_DB, SubscriberId) of
-        undefined ->
-            %% not_allowed topics are filtered out here
-            [{Topic, QoS, node()} || {Topic, QoS} <- Topics, is_integer(QoS)];
-        Subs ->
-            lists:foldl(fun ({_Topic, not_allowed}, NewSubsAcc) ->
-                                NewSubsAcc;
-                            ({Topic, QoS}, NewSubsAcc) ->
-                                NewSub = {Topic, QoS, node()},
-                                case lists:member(NewSub, NewSubsAcc) of
-                                    true -> NewSubsAcc;
-                                    false ->
-                                        [NewSub|NewSubsAcc]
-                                end
-                        end, Subs, Topics)
-    end,
+    lists:foldl(fun ({_Topic, not_allowed}, NewSubsAcc) ->
+                        NewSubsAcc;
+                    ({[<<"$GROUP-", _binary>>|_], _}, NewSubsAcc)
+                      when not AllowSubscriberGroups ->
+                        NewSubsAcc;
+                    ({Topic, QoS}, NewSubsAcc) when is_integer(QoS) ->
+                        NewSub = {Topic, QoS, node()},
+                        case lists:member(NewSub, NewSubsAcc) of
+                            true -> NewSubsAcc;
+                            false ->
+                                [NewSub|NewSubsAcc]
+                        end
+                end, OldSubs, Topics),
     plumtree_metadata:put(?SUBSCRIBER_DB, SubscriberId, NewSubs).
-
 
 -spec del_subscriber(subscriber_id()) -> ok.
 del_subscriber(SubscriberId) ->

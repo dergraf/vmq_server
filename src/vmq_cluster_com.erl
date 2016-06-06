@@ -146,7 +146,7 @@ process(<<"msg", L:32, Bin:L/binary, Rest/binary>>) ->
     #vmq_msg{mountpoint=MP,
              routing_key=Topic,
              reg_view=RegView} = Msg = binary_to_term(Bin),
-    _ = vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg),
+    _ = vmq_reg:publish(RegView, MP, Topic, fun publish_fold_fun/2, Msg),
     process(Rest);
 process(<<"enq", L:32, Bin:L/binary, Rest/binary>>) ->
     {CallerPid, Ref, {enqueue, QueuePid, Msgs}} = binary_to_term(Bin),
@@ -165,9 +165,44 @@ process(<<"enq", L:32, Bin:L/binary, Rest/binary>>) ->
     process(Rest);
 process(<<>>) -> ok.
 
-publish({_, _} = SubscriberIdAndQoS, Msg) ->
-    vmq_reg:publish(SubscriberIdAndQoS, Msg);
-publish(_Node, Msg) ->
-    %% we ignore remote subscriptions, they are already covered
-    %% by original publisher
-    Msg.
+publish_fold_fun({{_,_}, _} = SubscriberIdAndQoS, Acc) ->
+    %% Local Subscription
+    vmq_reg:publish_fold_fun(SubscriberIdAndQoS, Acc);
+publish_fold_fun({{_, Node, _}, _} = GroupSub, {Msg, SubscriberGroups} = Acc)
+  when Node == node() ->
+    %% Only handle SubscriberGroups for local node
+    %% Why this Case Clause??
+    %%
+    %% Assuming you have two nodes A and B.
+    %% Node A has one subscriber with a/b
+    %% and one subscriber with $GROUP-test/a/b
+    %%
+    %% A message with a routing key a/b issued on Node B
+    %% would result in two matching routing entries for Node A,
+    %% not just one in the case of 'normal' subscriptions.
+    %%
+    %% For this reason we have to filter out the messages
+    %% not targetted to the subscriber group member.
+    %%
+    %% Note: Currently the message gets at max two times,
+    %% once for the subscriber group and once for the
+    %% 'normal' subscription.
+    case Msg#vmq_msg.routing_key of
+        [<<"$GROUP-", _/binary>>|Topic] ->
+            %% It's a message fot the subscriber group member
+            TempAcc = {Msg#vmq_msg{routing_key=Topic}, SubscriberGroups},
+            vmq_reg:publish_fold_fun(GroupSub, TempAcc),
+            Acc;
+        _ ->
+            %% Filter out the message
+            Acc
+    end;
+publish_fold_fun(_, Acc) ->
+    %% Could be Messages targetted for remote subscriptions that are already
+    %% covered by the origin publisher
+    %%
+    %% or
+    %%
+    %% could be messages targetted for subscriber groups that are already
+    %% covered by the origin publisher
+    Acc.
