@@ -592,7 +592,8 @@ auth_on_register(User, Password, State) ->
                              max_inflight_messages=?state_val(max_inflight_messages, Args, State),
                              retry_interval=?state_val(retry_interval, Args, State),
                              upgrade_qos=?state_val(upgrade_qos, Args, State),
-                             trade_consistency=?state_val(trade_consistency, Args, State)
+                             trade_consistency=?state_val(trade_consistency, Args, State),
+                             allow_subscriber_groups=?state_val(allow_subscriber_groups, Args, State)
                             },
             {ok, queue_opts(ChangedState, Args), ChangedState};
         {error, Reason} ->

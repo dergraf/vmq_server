@@ -168,8 +168,7 @@ process(<<>>) -> ok.
 publish_fold_fun({{_,_}, _} = SubscriberIdAndQoS, Acc) ->
     %% Local Subscription
     vmq_reg:publish_fold_fun(SubscriberIdAndQoS, Acc);
-publish_fold_fun({{_, Node, _}, _} = GroupSub, {Msg, SubscriberGroups} = Acc)
-  when Node == node() ->
+publish_fold_fun({{_, Node, _}, _} = GroupSub, {Msg, _} = Acc) when Node == node() ->
     %% Only handle SubscriberGroups for local node
     %% Why this Case Clause??
     %%
@@ -187,13 +186,11 @@ publish_fold_fun({{_, Node, _}, _} = GroupSub, {Msg, SubscriberGroups} = Acc)
     %% Note: Currently the message gets at max two times,
     %% once for the subscriber group and once for the
     %% 'normal' subscription.
-    case Msg#vmq_msg.routing_key of
-        [<<"$GROUP-", _/binary>>|Topic] ->
-            %% It's a message fot the subscriber group member
-            TempAcc = {Msg#vmq_msg{routing_key=Topic}, SubscriberGroups},
-            vmq_reg:publish_fold_fun(GroupSub, TempAcc),
-            Acc;
-        _ ->
+    case Msg#vmq_msg.part_of_group of
+        true ->
+            %% It's a message for the subscriber group member
+            vmq_reg:publish_fold_fun(GroupSub, Acc);
+        false ->
             %% Filter out the message
             Acc
     end;

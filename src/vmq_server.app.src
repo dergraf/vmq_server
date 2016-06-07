@@ -22,6 +22,7 @@
   {env, [
       % session opts
       {allow_anonymous, true},
+      {allow_subscriber_groups, false},
       {max_client_id_size, 23},
       {retry_interval, 20},
       {max_inflight_messages, 20},

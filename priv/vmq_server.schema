@@ -21,6 +21,20 @@
                                                                {default, off},
                                                                {datatype, flag}
                                                               ]}.
+%%
+%% @doc Allows multiple clients to subscribe to a group topic. A group topic
+%% enables the distribution of messages among the different subscriber group 
+%% members. To start a new subscriber group or to become a group member a client 
+%% must prefix a SUBSCRIBE topic with $GROUP-<mygroupname> followed by the
+%% topic. 
+%% Assuming multiple clients are subscribed to $GROUP-mygroup/a/b/c. Messages
+%% to a/b/c are randomly distributed among the member of the subscriber group 'mygroup'. 
+%% (non-standard behaviour!).
+{mapping, "allow_subscriber_groups", "vmq_server.allow_subscriber_groups", [
+                                                               {default, off},
+                                                               {datatype, flag},
+                                                               hidden
+                                                              ]}.
 
 %% @doc If allow_multiple_sessions is enabled 'queue_deliver_mode' will specify
 %% how the messages are delivered to multiple sessions. Default is 'fanout' which

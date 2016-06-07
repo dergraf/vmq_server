@@ -100,7 +100,7 @@ subscribe_(User, AllowSubscriberGroups, SubscriberId, Topics) ->
 subscribe_op(User, AllowSubscriberGroups, SubscriberId, Topics) ->
     rate_limited_op(
       fun() ->
-              add_subscriber(AllowSubscriberGroups, Topics, SubscriberId)
+              add_subscriber(AllowSubscriberGroups, SubscriberId, Topics)
       end,
       fun(_) ->
               QoSTable =
@@ -311,7 +311,8 @@ publish_fold_acc(Msg) -> {Msg, undefined}.
 
 publish_to_subscriber_groups(_, undefined) -> ok;
 publish_to_subscriber_groups(Msg, SubscriberGroups) when is_map(SubscriberGroups) ->
-    publish_to_subscriber_groups(Msg, maps:to_list(SubscriberGroups));
+    NewMsg = Msg#vmq_msg{part_of_group=true},
+    publish_to_subscriber_groups(NewMsg, maps:to_list(SubscriberGroups));
 publish_to_subscriber_groups(_, []) -> ok;
 publish_to_subscriber_groups(Msg, [{Group, []}|Rest]) ->
     lager:warning("can't publish to subscriber group ~p due to no subscriber available", [Group]),
@@ -330,13 +331,7 @@ publish_to_subscriber_groups(Msg, [{Group, SubscriberGroup}|Rest]) ->
                     publish_to_subscriber_groups(Msg, Rest)
             end;
         {Node, _, _} = Sub ->
-            #vmq_msg{routing_key=Topic} = Msg,
-            %% it's important that the remote cluster node understands that
-            %% this message has been routed as part of a subscriber group.
-            %% In vmq_cluster_com:publish_fold_fun the $GROUP-Group Prefix
-            %% get's removed again.
-            NewMsg = Msg#vmq_msg{routing_key=[<<"$GROUP-", Group/binary>>|Topic]},
-            case vmq_cluster:publish(Node, NewMsg) of
+            case vmq_cluster:publish(Node, Msg) of
                 ok ->
                     publish_to_subscriber_groups(Msg, Rest);
                 {error, Reason} ->
@@ -355,6 +350,8 @@ add_to_subscriber_group({{Group, Node, SubscriberId}, QoS}, SubscriberGroups) ->
              SubscriberGroups).
 
 -spec deliver_retained(subscriber_id(), topic(), qos()) -> 'ok'.
+deliver_retained(SubscriberId, [<<"$GROUP-", _/binary>>|Topic], QoS) ->
+    deliver_retained(SubscriberId, Topic, QoS);
 deliver_retained({MP, _} = SubscriberId, Topic, QoS) ->
     QPid = get_queue_pid(SubscriberId),
     vmq_retain_srv:match_fold(
@@ -751,8 +748,8 @@ fold_sessions(FoldFun, Acc) ->
                 end, AccAcc, vmq_queue:get_sessions(QPid))
       end, Acc).
 
--spec add_subscriber(flag(), [{topic(), qos() | not_allowed}], subscriber_id()) -> ok.
-add_subscriber(AllowSubscriberGroups, Topics, SubscriberId) ->
+-spec add_subscriber(flag(), subscriber_id(), [{topic(), qos() | not_allowed}]) -> ok.
+add_subscriber(AllowSubscriberGroups, SubscriberId, Topics) ->
     OldSubs = plumtree_metadata:get(?SUBSCRIBER_DB, SubscriberId, [{default, []}]),
     NewSubs =
     lists:foldl(fun ({_Topic, not_allowed}, NewSubsAcc) ->

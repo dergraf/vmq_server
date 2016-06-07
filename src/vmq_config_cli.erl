@@ -27,6 +27,7 @@ register_config_() ->
     ["allow_anonymous",
      "trade_consistency",
      "allow_multiple_sessions",
+     "allow_subscriber_groups",
      "queue_deliver_mode",
      "queue_type",
      "retry_interval",
