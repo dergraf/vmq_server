@@ -311,13 +311,13 @@ publish_fold_acc(Msg) -> {Msg, undefined}.
 
 publish_to_subscriber_groups(_, undefined) -> ok;
 publish_to_subscriber_groups(Msg, SubscriberGroups) when is_map(SubscriberGroups) ->
-    NewMsg = Msg#vmq_msg{part_of_group=true},
-    publish_to_subscriber_groups(NewMsg, maps:to_list(SubscriberGroups));
+    publish_to_subscriber_groups(Msg, maps:to_list(SubscriberGroups));
 publish_to_subscriber_groups(_, []) -> ok;
 publish_to_subscriber_groups(Msg, [{Group, []}|Rest]) ->
     lager:warning("can't publish to subscriber group ~p due to no subscriber available", [Group]),
     publish_to_subscriber_groups(Msg, Rest);
 publish_to_subscriber_groups(Msg, [{Group, SubscriberGroup}|Rest]) ->
+    NewMsg = Msg#vmq_msg{subscriber_group=Group},
     N = random:uniform(length(SubscriberGroup)),
     case lists:nth(N, SubscriberGroup) of
         {Node, SubscriberId, QoS} = Sub when Node == node() ->
@@ -325,20 +325,20 @@ publish_to_subscriber_groups(Msg, [{Group, SubscriberGroup}|Rest]) ->
                 not_found ->
                     NewSubscriberGroup = lists:delete(Sub, SubscriberGroup),
                     %% retry with other members of this group
-                    publish_to_subscriber_groups(Msg, [{Group, NewSubscriberGroup}|Rest]);
+                    publish_to_subscriber_groups(NewMsg, [{Group, NewSubscriberGroup}|Rest]);
                 QPid ->
-                    ok = vmq_queue:enqueue(QPid, {deliver, QoS, Msg}),
-                    publish_to_subscriber_groups(Msg, Rest)
+                    ok = vmq_queue:enqueue(QPid, {deliver, QoS, NewMsg}),
+                    publish_to_subscriber_groups(NewMsg, Rest)
             end;
         {Node, _, _} = Sub ->
-            case vmq_cluster:publish(Node, Msg) of
+            case vmq_cluster:publish(Node, NewMsg) of
                 ok ->
-                    publish_to_subscriber_groups(Msg, Rest);
+                    publish_to_subscriber_groups(NewMsg, Rest);
                 {error, Reason} ->
                     lager:warning("can't publish for subscriber group to remote node ~p due to '~p'", [Node, Reason]),
                     NewSubscriberGroup = lists:delete(Sub, SubscriberGroup),
                     %% retry with other members of this group
-                    publish_to_subscriber_groups(Msg, [{Group, NewSubscriberGroup}|Rest])
+                    publish_to_subscriber_groups(NewMsg, [{Group, NewSubscriberGroup}|Rest])
             end
     end.
 

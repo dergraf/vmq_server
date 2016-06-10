@@ -186,13 +186,13 @@ publish_fold_fun({{_, Node, _}, _} = GroupSub, {Msg, _} = Acc) when Node == node
     %% Note: Currently the message gets at max two times,
     %% once for the subscriber group and once for the
     %% 'normal' subscription.
-    case Msg#vmq_msg.part_of_group of
-        true ->
-            %% It's a message for the subscriber group member
-            vmq_reg:publish_fold_fun(GroupSub, Acc);
-        false ->
+    case Msg#vmq_msg.subscriber_group of
+        undefined ->
             %% Filter out the message
-            Acc
+            Acc;
+        Group when is_binary(Group) ->
+            %% It's a message for the subscriber group member
+            vmq_reg:publish_fold_fun(GroupSub, Acc)
     end;
 publish_fold_fun(_, Acc) ->
     %% Could be Messages targetted for remote subscriptions that are already

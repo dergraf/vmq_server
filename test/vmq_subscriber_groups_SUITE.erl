@@ -72,7 +72,7 @@ subscriber_groups_test(Config) ->
     {_, Nodes} = lists:keyfind(nodes, 1, Config),
     NumSubs = 10,
     NumMsgs = 100,
-    ok = start_subscribers(NumSubs, Nodes),
+    _ = start_subscribers(NumSubs, Nodes),
     ok = wait_until_converged(Nodes,
                          fun(N) ->
                                  rpc:call(N, vmq_reg, total_subscriptions, [])
@@ -104,7 +104,7 @@ retain_test(Config) ->
                          fun(N) ->
                                  rpc:call(N, vmq_reg, retained, [])
                          end, 1),
-    ok = start_subscribers(NumSubs, Nodes),
+    _ = start_subscribers(NumSubs, Nodes),
     ok = wait_until_converged(Nodes,
                          fun(N) ->
                                  rpc:call(N, vmq_reg, total_subscriptions, [])
@@ -113,14 +113,44 @@ retain_test(Config) ->
     check_uniformness(NumSubs, NumSubs, Ret),
     ?assertEqual([], flush_mailbox([])).
 
-start_subscribers(0, _) -> ok;
-start_subscribers(N, [{_, Port} = Node|Nodes]) ->
+republish_test(Config) ->
+    ok = ensure_cluster(Config),
+    {_, [{_FirstPort}|_] = Nodes} = lists:keyfind(nodes, 1, Config),
+    NumSubs = 10,
+    NumMsgs = 100,
+
+    %% Create NumSubs -1 Subscribers on all nodes which are not acking
+    %% any PUBLISH they receive.
+    NotAckingPids = start_subscribers(NumSubs - 1, Nodes, false, []),
+    %% Create 1 Subscriber on one node which is behaving normally
+    Self = self(),
+    ClientId = "sub-group-client-xyz",
+    AckingPid = spawn_link(fun() -> recv_connect(Self, ClientId, Port, true) end),
+
+    %% Wait until cluster has converged
+    ok = wait_until_converged(Nodes,
+                         fun(N) ->
+                                 rpc:call(N, vmq_reg, total_subscriptions, [])
+                         end, [{total, NumSubs}]),
+    %% Send messages, only one subscriber is properly acking the messages
+    Payloads = send(NumMsgs, Nodes, []),
+    %% Let's kill one after the other
+    Ret = mgr_recv_loop(Payloads, #{}),
+    check_uniformness(NumSubs, NumMsgs, Ret),
+    ?assertEqual([], flush_mailbox([])).
+
+
+start_subscribers(N, Nodes) ->
+    start_subscribers(N, Nodes, true, []).
+
+start_subscribers(0, _, DoAck, Pids) -> Pids;
+start_subscribers(N, [{_, Port} = Node|Nodes], DoAck, Acc) ->
     Self = self(),
     ClientId = "sub-group-client-"++integer_to_list(N),
-    spawn_link(fun() -> recv_connect(Self, ClientId, Port) end),
-    start_subscribers(N - 1, Nodes ++ [Node]).
+    Pid = spawn_link(fun() -> recv_connect(Self, ClientId, Port, DoAck) end),
+    start_subscribers(N - 1, Nodes ++ [Node], DoAck, [Pid|Acc]).
 
-recv_connect(Parent, ClientId, Port) ->
+recv_connect(Parent, ClientId, Port, DoAck) ->
     Connect = packet:gen_connect(ClientId, [{clean_session, true},
                                             {keepalive, 60}]),
     Connack = packet:gen_connack(0),
@@ -131,22 +161,24 @@ recv_connect(Parent, ClientId, Port) ->
     ok = gen_tcp:send(Socket, Subscribe),
     ok = packet:expect_packet(Socket, "suback", Suback),
     inet:setopts(Socket, [{active, true}]),
-    recv_loop(Parent, Port, Socket, <<>>).
+    recv_loop(Parent, Port, Socket, <<>>, DoAck).
 
-recv_loop(Parent, Port, Socket, Buf) ->
+recv_loop(Parent, Port, Socket, Buf, DoAck) ->
     case vmq_parser:parse(Buf) of
         more ->
             ok;
         {error, _} = E ->
             exit(E);
-        {#mqtt_publish{message_id=MsgId, payload=Payload}, NewBuf} ->
+        {#mqtt_publish{message_id=MsgId, payload=Payload}, NewBuf} when DoAck->
             ok = gen_tcp:send(Socket, packet:gen_puback(MsgId)),
             Parent ! {recv, self(), Payload},
-            recv_loop(Parent, Port, Socket, NewBuf)
+            recv_loop(Parent, Port, Socket, NewBuf, DoAck);
+        {_, NewBuf} ->
+            recv_loop(Parent, Port, Socket, NewBuf, DoAck)
     end,
     receive
         {tcp, Socket, Data} ->
-            recv_loop(Parent, Port, Socket, <<Buf/binary, Data/binary>>);
+            recv_loop(Parent, Port, Socket, <<Buf/binary, Data/binary>>, DoAck);
         {tcp_closed, Socket} ->
             ok;
         Else ->

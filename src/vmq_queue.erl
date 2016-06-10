@@ -176,7 +176,7 @@ online({change_state, NewSessionState, SessionPid}, State) ->
     {next_state, online, change_session_state(NewSessionState, SessionPid, State)};
 online({notify_recv, SessionPid}, #state{id=SId, sessions=Sessions} = State) ->
     #session{queue=#queue{backup=Backup} = Queue} = Session = maps:get(SessionPid, Sessions),
-    cleanup_queue(SId, Backup),
+    _ = cleanup_queue(SId, Backup),
     NewSessions = maps:update(SessionPid,
                               Session#session{queue=Queue#queue{backup=queue:new()}},
                               Sessions),
@@ -242,7 +242,7 @@ drain(drain_start, #state{id=SId, offline=#queue{queue=Q} = Queue,
     %% instead of the erlang distribution link.
     case vmq_cluster:remote_enqueue(node(RemoteQueue), {enqueue, RemoteQueue, Msgs}) of
         ok ->
-            cleanup_queue(SId, DrainQ),
+            _ = cleanup_queue(SId, DrainQ),
             case queue:len(NewQ) of
                 L when L > 0 ->
                     gen_fsm:send_event(self(), drain_start),
@@ -317,7 +317,7 @@ offline(expire_session, #state{id=SId, offline=#queue{queue=Q}} = State) ->
     vmq_exo:decr_inactive_clients(),
     vmq_exo:incr_expired_clients(),
     vmq_reg:delete_subscriptions(SId),
-    cleanup_queue(SId, Q),
+    _ = cleanup_queue(SId, Q),
     {stop, normal, State};
 offline(Event, State) ->
     lager:error("got unknown event in offline state ~p", [Event]),
@@ -466,18 +466,18 @@ del_session(SessionPid, #state{id=SId, sessions=Sessions} = State) ->
     NewSessions = maps:remove(SessionPid, Sessions),
     case maps:get(SessionPid, Sessions) of
         #session{clean=true} = Session ->
-            cleanup_session(SId, Session),
-            {State#state{sessions=NewSessions}, Session};
+            Republish = cleanup_session(SId, Session, maps:size(NewSessions) == 0),
+            {State#state{sessions=NewSessions}, Session, Republish};
         Session ->
             %% give queue content of this session to other alive sessions
             %% or to offline queue
             {insert_from_session(Session, State#state{sessions=NewSessions}),
-             Session}
+             Session, []}
     end.
 
 handle_session_down(SessionPid, StateName,
                     #state{id=SId, waiting_call=WaitingCall} = State) ->
-    {NewState, DeletedSession} = del_session(SessionPid, State),
+    {NewState, DeletedSession, Republish} = del_session(SessionPid, State),
     case {maps:size(NewState#state.sessions), StateName, WaitingCall} of
         {0, wait_for_offline, {add_session, NewSessionPid, Opts, From}} ->
             %% last session gone
@@ -515,6 +515,8 @@ handle_session_down(SessionPid, StateName,
             %% clean session flag
             vmq_exo:decr_active_clients(),
             vmq_reg:delete_subscriptions(SId),
+            %% If possible republish to subscriber groups if available
+            republish(SId, Republish),
             _ = vmq_plugin:all(on_client_gone, [SId]),
             {stop, normal, NewState};
         {0, OldStateName, _} ->
@@ -569,7 +571,7 @@ disconnect_sessions(#state{sessions=Sessions}) ->
 change_session_state(NewState, SessionPid, #state{id=SId, sessions=Sessions} = State) ->
 
     #session{queue=#queue{backup=Backup} = Queue} = Session = maps:get(SessionPid, Sessions),
-    cleanup_queue(SId, Backup),
+    _ = cleanup_queue(SId, Backup),
     UpdatedSession = change_session_state(NewState, Session#session{queue=Queue#queue{backup=queue:new()}}),
     NewSessions = maps:update(SessionPid, UpdatedSession, Sessions),
     State#state{sessions=NewSessions}.
@@ -702,23 +704,40 @@ send_notification(#session{pid=Pid} = Session) ->
     vmq_mqtt_fsm:send(Pid, {mail, self(), new_data}),
     Session#session{status=passive}.
 
-cleanup_session(SubscriberId, #session{queue=#queue{queue=Q}}) ->
-    cleanup_queue(SubscriberId, Q).
+cleanup_session(SubscriberId, #session{queue=#queue{queue=Q}}, DoCollectRepublish) ->
+    cleanup_queue(SubscriberId, Q, DoCollectRepublish).
 
-cleanup_queue(_, {[],[]}) -> ok; %% optimization
 cleanup_queue(SId, Queue) ->
-    cleanup_queue_(SId, queue:out(Queue)).
+    cleanup_queue(SId, Queue, false).
 
-cleanup_queue_(SId, {{value, {deliver, _, _} = Msg}, NewQueue}) ->
+cleanup_queue(_, {[],[]}, _) -> ok; %% optimization
+cleanup_queue(SId, Queue, false) ->
+    cleanup_queue_(SId, queue:out(Queue), false);
+cleanup_queue(SId, Queue, true) ->
+    cleanup_queue_(SId, queue:out(Queue), []).
+
+cleanup_queue_(SId, {{value, {deliver, _, _} = Msg}, NewQueue}, false) ->
     maybe_offline_delete(SId, Msg),
-    cleanup_queue_(SId, queue:out(NewQueue));
-cleanup_queue_(SId, {{value, {deliver_bin, _}}, NewQueue}) ->
+    cleanup_queue_(SId, queue:out(NewQueue), false);
+cleanup_queue_(SId, {{value, {deliver, _, #vmq_msg{subscriber_group=Group}} =
+                      Msg}, NewQueue}, RepublishAcc)->
+    NewRepublishAcc =
+    case Group of
+        undefined ->
+            RepublishAcc;
+        _ ->
+            [Msg|RepublishAcc]
+    end,
+    maybe_offline_delete(SId, Msg),
+    cleanup_queue_(SId, queue:out(NewQueue), NewRepublishAcc);
+cleanup_queue_(SId, {{value, {deliver_bin, _}}, NewQueue}, RepublishAcc) ->
     % no need to deref
-    cleanup_queue_(SId, queue:out(NewQueue));
-cleanup_queue_(SId, {{value, MsgRef}, NewQueue}) when is_binary(MsgRef) ->
+    cleanup_queue_(SId, queue:out(NewQueue), RepublishAcc);
+cleanup_queue_(SId, {{value, MsgRef}, NewQueue}, RepublishAcc) when is_binary(MsgRef) ->
     maybe_offline_delete(SId, MsgRef),
-    cleanup_queue_(SId, queue:out(NewQueue));
-cleanup_queue_(_, {empty, _}) -> ok.
+    cleanup_queue_(SId, queue:out(NewQueue), RepublishAcc);
+cleanup_queue_(_, {empty, _}, false) -> ok;
+cleanup_queue_(_, {empty, _}, RepublishAcc) -> RepublishAcc.
 
 
 session_fold(SId, Fun, Acc, Map) ->
@@ -840,3 +859,51 @@ queue_split(N, Queue) ->
              L -> L
          end,
     queue:split(NN, Queue).
+
+republish(_, []) -> ok;
+republish(SId, [{deliver, _, Msg}|Rest]) ->
+    #vmq_msg{mountpoint=MP,
+             routing_key=Topic,
+             reg_view=RegView,
+             subscriber_group=G} = Msg,
+    NewMsg = Msg#vmq_msg{persisted=false, msg_ref=undefined},
+    _ = vmq_reg:publish(RegView, MP, Topic,
+                        %% The Publish Fold Fun is 'normaly' used to publish
+                        %% the message to every subscriber. But it also
+                        %% accumulates the subscribers of subscriber groups
+                        %% which are (once accumulated) used to route the
+                        %% message to a specific member of a group.
+                        %%
+                        %% In this case we only want to accumulate the
+                        %% subscriber groups as the goal is to find a new
+                        %% available member of the group that could handle the
+                        %% messages.
+                        %%
+                        %% TODO: improve the interface to the publish_fold_fun
+                        %%       so the usage from outside vmq_reg is more
+                        %%       intuitive.
+                        %%
+                        %% Fun
+                        %%      -- Local Subscription
+                        %%      ({SubscriberId, QoS}, {Msg, SubGroups})
+                        %%      -> {Msg, SubGroups};
+                        %%
+                        %%      -- A SubscriberGroup Subscription
+                        %%      ({{Group, Node, SubscriberId}, QoS}, {Msg, SubGroups})
+                        %%      -> {Msg, SubGroups};
+                        %%
+                        %%      -- Remote Subscription
+                        %%      (Node, {Msg, SubGroups})
+                        %%      -> {Msg, SubGroups};
+                        %%
+                        fun({{Group, _, SubscriberId}, _} = Sub, {AccMsg, SubscriberGroups})
+                              when (Group == G) and (SubscriberId =/= SId) ->
+                                %% only include this Subscription IF the
+                                %% SubscriberId is not ourself and the it is in
+                                %% the same Group as we are.
+                                {AccMsg, vmq_reg:add_to_subscriber_group(Sub, SubscriberGroups)};
+                           (_, Acc) ->
+                                %% ignore every other subscription
+                                Acc
+                        end, NewMsg),
+    republish(SId, Rest).
