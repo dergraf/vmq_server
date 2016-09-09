@@ -500,26 +500,25 @@
                                                            hidden
                                                           ]}.
 
-%% @doc listener.http.metrics is the IP address and TCP port that
-%% the broker will bind to accept HTTP connections from metrics collectors
-%% such as Prometheus e.g:
-%% - listener.http.metrics = 0.0.0.0:8888
+%% @doc listener.http.default is the IP address and TCP port that
+%% the broker will bind to accept HTTP connections 
+%% - listener.http.default = 0.0.0.0:8888
 %% This also works for SSL listeners:
-%% - listener.https.metrics= 0.0.0.0:8889
+%% - listener.https.default= 0.0.0.0:8889
 {mapping, "listener.http.$name", "vmq_server.listeners", [
                                                           {default, { "{{http_default_ip}}", {{http_default_port}} }},
                                                           {datatype, ip},
-                                                          {include_default, "metrics"}
+                                                          {include_default, "default"}
                                                          ]}.
 
 {mapping, "listener.http.$name.config_mod", "vmq_server.listeners", [
-                                                                     {default, vmq_metrics_http},
+                                                                     {default, vmq_http_config},
                                                                      {datatype, atom},
                                                                      hidden
                                                                     ]}.
 
 {mapping, "listener.http.$name.config_fun", "vmq_server.listeners", [
-                                                                     {default, routes},
+                                                                     {default, config},
                                                                      {datatype, atom},
                                                                      hidden
                                                                     ]}.

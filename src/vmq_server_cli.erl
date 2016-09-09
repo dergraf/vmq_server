@@ -23,7 +23,8 @@
 init_registry() ->
     F = fun() -> vmq_cluster:nodes() end,
     clique:register_node_finder(F),
-    clique:register([?MODULE, vmq_plugin_cli]).
+    clique:register([?MODULE, vmq_plugin_cli]),
+    clique_writer:register("json", vmq_cli_json_writer).
 
 command(Cmd) ->
     command(Cmd, true).
@@ -45,9 +46,6 @@ parse_res([{_, _}|Rest], Res) ->
     parse_res(Rest, Res);
 parse_res([], Res) ->
     {ok, Res}.
-
-
-
 
 register_cli() ->
     vmq_config_cli:register_config(),
@@ -114,23 +112,62 @@ vmq_server_status_cmd() ->
 
 vmq_server_metrics_cmd() ->
     Cmd = ["vmq-admin", "metrics", "show"],
-    Callback = fun(_, _, _) ->
-                       lists:foldl(
-                         fun({Type, Metric, Val}, Acc) ->
-                                 SType = atom_to_list(Type),
-                                 SMetric = atom_to_list(Metric),
-                                 SVal =
-                                 case Val of
-                                     V when is_integer(V) ->
-                                         integer_to_list(V);
-                                     V when is_float(V) ->
-                                         float_to_list(V)
-                                 end,
-                                 Line = [SType, ".", SMetric, " = ", SVal],
-                                 [clique_status:text(lists:flatten(Line))|Acc]
-                         end, [], vmq_metrics:metrics())
+    FlagSpecs = [{table, [{shortname, "t"},
+                          {longname, "table"}]},
+                 {all, [{shortname, "a"},
+                        {longname, "all"}]}],
+    Callback = fun(_, _, Flags) ->
+                       IsTable = lists:keymember(table, 1, Flags),
+                       FmtFun =
+                       fun(Node, Type, Metric, Val) ->
+                               case IsTable of
+                                   true when Node =/= undefined ->
+                                       [{'Node', Node}, {'Type', Type}, {'Metric', Metric}, {'Value', Val}];
+                                   true ->
+                                       [{'Type', Type}, {'Metric', Metric}, {'Value', Val}];
+                                   false ->
+                                       SType = atom_to_list(Type),
+                                       SMetric = atom_to_list(Metric),
+                                       SVal =
+                                       case Val of
+                                           V when is_integer(V) ->
+                                               integer_to_list(V);
+                                           V when is_float(V) ->
+                                               float_to_list(V)
+                                       end,
+                                       Line =
+                                       case Node of
+                                           undefined ->
+                                               [SType, ".", SMetric, " = ", SVal];
+                                           _ ->
+                                               SNode = atom_to_list(Node),
+                                               [SNode, ".", SType, ".", SMetric, " = ", SVal]
+                                       end,
+                                       clique_status:text(lists:flatten(Line))
+                               end
+                       end,
+
+                       Ret =
+                       case lists:keymember(all, 1, Flags) of
+                           true ->
+                               lists:foldl(fun({Node, {Type, Metric, Val}}, Acc) ->
+                                                   Row = FmtFun(Node, Type, Metric, Val),
+                                                   [Row|Acc]
+                                           end, [], vmq_metrics:cluster_metrics());
+                           false ->
+                               lists:foldl(fun({Type, Metric, Val}, Acc) ->
+                                                   Row = FmtFun(undefined, Type, Metric, Val),
+                                                   [Row|Acc]
+                                           end, [], vmq_metrics:metrics())
+                       end,
+                       case IsTable of
+                           true ->
+                               [clique_status:table(Ret)];
+                           false ->
+                               Ret
+                       end
                end,
-    clique:register_command(Cmd, [], [], Callback).
+    clique:register_command(Cmd, [], FlagSpecs, Callback).
 
 vmq_server_metrics_reset_cmd() ->
     Cmd = ["vmq-admin", "metrics", "reset"],

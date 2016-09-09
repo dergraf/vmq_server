@@ -71,6 +71,7 @@
         ]).
 
 -export([metrics/0,
+         cluster_metrics/0,
          check_rate/2,
          reset_counters/0,
          reset_counter/1,
@@ -301,6 +302,18 @@ metrics() ->
                           end} | Acc]
                 end, system_statistics() ++ misc_statistics(), counter_entries()).
 
+cluster_metrics() ->
+    cluster_metrics(vmq_cluster:nodes(), []).
+
+cluster_metrics([], Acc) -> Acc;
+cluster_metrics([Node|Rest], Acc) ->
+    case rpc:call(Node, ?MODULE, metrics, []) of
+        {badrpc, _} ->
+            cluster_metrics(Rest, Acc);
+        Metrics ->
+            cluster_metrics(Rest, [{Node, M} || M <- Metrics] ++ Acc)
+    end.
+
 counter_entries() ->
     [socket_open, socket_close, socket_error,
      bytes_received, bytes_sent,
@@ -375,6 +388,12 @@ system_statistics() ->
      scheduler_utilization()].
 
 scheduler_utilization() ->
+    case ets:lookup(?MODULE, scheduler_utilization) of
+        [] -> [];
+        [{_, Utilization}] -> Utilization
+    end.
+
+scheduler_utilization_() ->
     WallTimeTs0 =
     case erlang:get(vmq_metrics_scheduler_wall_time) of
         undefined ->
@@ -489,6 +508,8 @@ handle_info(calc_rates, State) ->
         _ ->
             lager:warning("Can't calculate message rates", [])
     end,
+    Utilization = scheduler_utilization_(),
+    ets:insert(?MODULE, {scheduler_utilization, Utilization}),
     {noreply, State}.
 
 %%--------------------------------------------------------------------

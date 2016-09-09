@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>VMQ Dash</title>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+
+    <link rel="stylesheet" href="assets/semantic.min.css">
+    <link rel="stylesheet" href="assets/font-awesome-4.6.3/css/font-awesome.min.css">
+
+  </head>
+
+  <body style="background-color:#666">
+      <app></app>
+            <!-- include the tag -->
+      <canvas id="test"></canvas>
+      <script type="riot/tag" src="app.tag"></script>
+      <script type="riot/tag" src="cluster.tag"></script>
+      <script type="riot/tag" src="cluster-node.tag"></script>
+      <script type="riot/tag" src="cluster-node-chart.tag"></script>
+      <!-- include riot.js -->
+      <script src="https://code.jquery.com/jquery-2.x-git.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/riot/2.6.1/riot+compiler.min.js"></script>
+      <script src="assets/riotcontrol.js"></script>
+      <script src="app.js"></script>
+      <script src="assets/semantic.min.js"></script>
+      <script src="assets/chart.min.js"></script>
+      <!-- mount the tag -->
+      <script>
+       riot.mount('app')
+       riot.mount('cluster')
+      </script>
+  </body>
+
+</html>
