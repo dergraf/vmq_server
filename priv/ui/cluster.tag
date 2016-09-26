@@ -1,10 +1,14 @@
 <cluster>
 <h3 class="ui center aligned header">Cluster Overview</h3>
-<div class="ui two column stackable grid container">
-    <div id="cluster-ring" class="column">
+<div class="ui three column stackable grid container">
+    <div class="column"></div>
+    <div id="cluster-ring" class="column" style="height:400px">
         <canvas id="vmq-cluster-queues" height="400" width="400"></canvas>
         <canvas id="vmq-cluster-messages" height="350" width="350"></canvas>
     </div>
+    <div class="column"></div>
+</div>
+<div class="ui one column stackable grid container">
     <div class="column">
         <table class="ui selectable inverted table">
             <thead>
@@ -83,31 +87,52 @@
 <script>
 this.nodes = {}
 
-function rainbow(numOfSteps, step) {
-    // This function generates vibrant, "evenly spaced" colours (i.e. no clustering). This is ideal for creating easily distinguishable vibrant markers in Google Maps and other apps.
-    // Adam Cole, 2011-Sept-14
-    // HSV to RBG adapted from: http://mjijackson.com/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript
-    var r, g, b;
-    var h = step / numOfSteps;
-    var i = ~~(h * 6);
-    var f = h * 6 - i;
-    var q = 1 - f;
-    switch(i % 6){
-        case 0: r = 1; g = f; b = 0; break;
-        case 1: r = q; g = 1; b = 0; break;
-        case 2: r = 0; g = 1; b = f; break;
-        case 3: r = 0; g = q; b = 1; break;
-        case 4: r = f; g = 0; b = 1; break;
-        case 5: r = 1; g = 0; b = q; break;
-    }
 
+/* From: http://stackoverflow.com/questions/17242144/javascript-convert-hsb-hsv-color-to-rgb-accurately 
+ * accepts parameters
+ * h  Object = {h:x, s:y, v:z}
+ * OR 
+ * h, s, v
+*/
+function hsv_to_rgb(h, s, v) {
+    var r, g, b, i, f, p, q, t;
+    if (arguments.length === 1) {
+        s = h.s, v = h.v, h = h.h;
+    }
+    i = Math.floor(h * 6);
+    f = h * 6 - i;
+    p = v * (1 - s);
+    q = v * (1 - f * s);
+    t = v * (1 - (1 - f) * s);
+    switch (i % 6) {
+        case 0: r = v, g = t, b = p; break;
+        case 1: r = q, g = v, b = p; break;
+        case 2: r = p, g = v, b = t; break;
+        case 3: r = p, g = q, b = v; break;
+        case 4: r = t, g = p, b = v; break;
+        case 5: r = v, g = p, b = q; break;
+    }
+    return {
+        r: Math.round(r * 255),
+        g: Math.round(g * 255),
+        b: Math.round(b * 255)
+    };
+}
+
+function rand_color() {
+    var golden_ratio = 0.618033988749895
+    var h = Math.random()
+    h += golden_ratio
+    h %= 1
+    var c = hsv_to_rgb(h, 0.85, 0.99)
     var dark = "#" 
-        + ("00" + (~ ~(r * 255)).toString(16)).slice(-2) 
-        + ("00" + (~ ~(g * 255)).toString(16)).slice(-2) 
-        + ("00" + (~ ~(b * 255)).toString(16)).slice(-2);
-    var light = "rgba(" + (~ ~(r * 255)) + "," + (~ ~(g * 255)) + "," + (~ ~(b * 255)) +", 0.7)";
+    + ("00" + (~ ~(c.r)).toString(16)).slice(-2) 
+    + ("00" + (~ ~(c.g)).toString(16)).slice(-2) 
+    + ("00" + (~ ~(c.b)).toString(16)).slice(-2);
+    var light = "rgba(" + (~ ~(c.r)) + "," + (~ ~(c.g)) + "," + (~ ~(c.b)) +", 0.7)";
     return {dark: dark, light: light};
 }
+
 
 function formatBytes(bytes) {
    if(bytes === 0 || typeof bytes === 'undefined') return '0B';
@@ -133,7 +158,8 @@ var self = this
 this.add_node = function(node_name) {
     if (typeof self.nodes[node_name] === 'undefined') {
         var id = Math.abs(node_name.hashCode())
-        var color = rainbow(500, id % 500)
+        var color = rand_color()
+        //var color = rainbow(10, Object.keys(self.nodes).length + 1)
         var node = { 
             id: id, 
             name: node_name,
@@ -235,7 +261,7 @@ self.transform_metrics = function(metrics) {
         node['data_out'] = formatBytes(rates[4])
         message_bgcolor.push(node.dark_color)
         message_bgcolor.push(node.light_color)
-        message_bgcolor.push('red')
+        message_bgcolor.push('black')
         message_labels.push(node.name + ' - Publish In')
         message_labels.push(node.name + ' - Publish Out')
         message_labels.push(node.name + ' - Publish Drop')
