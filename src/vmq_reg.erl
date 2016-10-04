@@ -263,15 +263,15 @@ publish(#vmq_msg{trade_consistency=true,
         true when Payload == <<>> ->
             %% retain delete action
             vmq_retain_srv:delete(MP, Topic),
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg#vmq_msg{retain=false}),
             ok;
         true ->
             %% retain set action
             vmq_retain_srv:insert(MP, Topic, Payload),
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg#vmq_msg{retain=false}),
             ok;
         false ->
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg),
             ok
     end;
 publish(#vmq_msg{trade_consistency=false,
@@ -285,34 +285,33 @@ publish(#vmq_msg{trade_consistency=false,
         true when (IsRetain == true) and (Payload == <<>>) ->
             %% retain delete action
             vmq_retain_srv:delete(MP, Topic),
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg#vmq_msg{retain=false}),
             ok;
         true when (IsRetain == true) ->
             %% retain set action
             vmq_retain_srv:insert(MP, Topic, Payload),
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg#vmq_msg{retain=false}),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg#vmq_msg{retain=false}),
             ok;
         true ->
-            vmq_reg_view:fold(RegView, MP, Topic, fun publish/2, Msg),
+            vmq_reg_view:fold(RegView, MP, Topic, fun publish/3, Msg),
             ok;
         false ->
             {error, not_ready}
     end.
 
-%% publish/2 is used as the fold function in RegView:fold/4
 publish({SubscriberId, QoS}, Msg) ->
-    publish(Msg, QoS, get_queue_pid(SubscriberId));
-publish(Node, Msg) ->
+    publish(get_queue_pid(SubscriberId), QoS, Msg).
+
+publish(not_found, _, Msg) -> Msg;
+publish(node, Node, Msg) ->
     case vmq_cluster:publish(Node, Msg) of
         ok ->
             Msg;
         {error, Reason} ->
             lager:warning("can't publish to remote node ~p due to '~p'", [Node, Reason]),
             Msg
-    end.
-
-publish(Msg, _, not_found) -> Msg;
-publish(Msg, QoS, QPid) ->
+    end;
+publish(QPid, QoS, Msg) ->
     ok = vmq_queue:enqueue(QPid, {deliver, QoS, Msg}),
     Msg.
 

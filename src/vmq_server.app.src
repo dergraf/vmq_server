@@ -18,6 +18,9 @@
                   mzmetrics,
                   rand_compat
                  ]},
+  {loaded_applications, [
+                         e2qc
+                        ]},
   {mod, { vmq_server_app, []}},
   {env, [
       % session opts

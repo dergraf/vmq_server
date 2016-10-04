@@ -53,7 +53,12 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 fold(MP, Topic, FoldFun, Acc) when is_list(Topic) ->
-    fold_(MP, FoldFun, Acc, match(MP, Topic)).
+    Cacheline =
+    e2qc:cache(?MODULE, {MP, Topic}, 10,
+               fun() ->
+                       fold_(MP, fun build_cache_line/2, [], match(MP, Topic))
+               end),
+    use_cache(FoldFun, Acc, Cacheline).
 
 fold_(MP, FoldFun, Acc, [{Topic, Node}|MatchedTopics]) when Node == node() ->
     fold_(MP, FoldFun,
@@ -67,6 +72,29 @@ fold_(_, _, Acc, []) -> Acc.
 fold__(FoldFun, Acc, [{_, SubsIdQoS}|Rest]) ->
     fold__(FoldFun, FoldFun(SubsIdQoS, Acc), Rest);
 fold__(_, Acc, []) -> Acc.
+
+build_cache_line({SubscriberId, QoS}, Acc) ->
+    case vmq_reg:get_queue_pid(SubscriberId) of
+        not_found -> Acc;
+        QPid ->
+            case re:split(pid_to_list(QPid), "\\.", [{return, list}]) of
+                ["<0", B, C0] ->
+                    C1 = lists:droplast(C0),
+                    [[], list_to_integer(B), list_to_integer(C1), QoS|Acc];
+                _ ->
+                    [{}, QPid, QoS|Acc]
+            end
+    end;
+build_cache_line(Node, Acc) ->
+    [n, Node|Acc].
+
+use_cache(FoldFun, Acc, [[], B, C, QoS|RestCache]) ->
+    use_cache(FoldFun, FoldFun(c:pid(0, B, C), QoS, Acc), RestCache);
+use_cache(FoldFun, Acc, [{}, QPid, QoS|RestCache]) ->
+    use_cache(FoldFun, FoldFun(QPid, QoS, Acc), RestCache);
+use_cache(FoldFun, Acc, [n, Node|RestCache]) ->
+    use_cache(FoldFun, FoldFun(node, Node, Acc), RestCache);
+use_cache(_, Acc, []) -> Acc.
 
 
 stats() ->
@@ -266,6 +294,7 @@ initialize_trie({MP, Topic, Node}, Acc) when is_atom(Node) ->
 
 add_topic(MP, Topic, Node) ->
     MPTopic = {MP, Topic},
+    e2qc:evict(?MODULE, MPTopic),
     case ets:lookup(vmq_trie_topic, MPTopic) of
         [] ->
             ets:insert(vmq_trie_topic, {MPTopic, 1, maps:put(Node, 1, maps:new()), [Node]});
@@ -338,6 +367,7 @@ trie_match(MP, Node, [W|Words], ResAcc) ->
 
 del_topic(MP, Topic, Node) ->
     MPTopic = {MP, Topic},
+    e2qc:evict(?MODULE, MPTopic),
     case ets:lookup(vmq_trie_topic, MPTopic) of
         [{_, TotalCnt, NodeMap, _}] ->
             {NewNodeMap, NewTotalCnt} =
